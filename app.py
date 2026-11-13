@@ -5,15 +5,27 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from flask import (
-    Flask, render_template, render_template_string, request,
-    redirect, url_for, flash, send_file, abort
+    Flask,
+    render_template,
+    request,
+    redirect,
+    url_for,
+    flash,
+    send_file,
+    abort
 )
+
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import (
-    LoginManager, UserMixin, login_user, logout_user,
-    login_required, current_user
+    LoginManager,
+    UserMixin,
+    login_user,
+    logout_user,
+    login_required,
+    current_user
 )
-from sqlalchemy import Table, Column, Integer, ForeignKey, UniqueConstraint
+
+from sqlalchemy import UniqueConstraint, func, inspect
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
@@ -30,14 +42,15 @@ UPLOAD_DIR = Path(
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# 50 TB quota per user (not pre-purchased storage)
-STORAGE_LIMIT = 50 * 1024 ** 4
+# Logical storage quota: 100 TB per account.
+USER_STORAGE_TB = int(os.environ.get("USER_STORAGE_TB", "100"))
+USER_STORAGE_LIMIT = USER_STORAGE_TB * (1024 ** 4)
 
 app = Flask(__name__)
 
 app.config["SECRET_KEY"] = os.environ.get(
     "SECRET_KEY",
-    "dev-only-change-this"
+    "dev-only-change-this-before-deploying"
 )
 
 app.config["MAX_CONTENT_LENGTH"] = (
@@ -51,7 +64,9 @@ database_url = os.environ.get(
 
 if database_url.startswith("postgres://"):
     database_url = database_url.replace(
-        "postgres://", "postgresql://", 1
+        "postgres://",
+        "postgresql://",
+        1
     )
 
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
@@ -65,33 +80,10 @@ login_manager.login_message = "Please sign in to continue."
 
 
 # ==================================================
-# FOLLOWER RELATIONSHIP
-# ==================================================
-
-follows = Table(
-    "follows",
-    db.metadata,
-    Column(
-        "follower_id",
-        Integer,
-        ForeignKey("user.id"),
-        primary_key=True
-    ),
-    Column(
-        "followed_id",
-        Integer,
-        ForeignKey("user.id"),
-        primary_key=True
-    )
-)
-
-
-# ==================================================
-# USER MODEL
+# DATABASE MODELS
 # ==================================================
 
 class User(UserMixin, db.Model):
-
     id = db.Column(db.Integer, primary_key=True)
 
     username = db.Column(
@@ -123,15 +115,6 @@ class User(UserMixin, db.Model):
         cascade="all, delete-orphan"
     )
 
-    following = db.relationship(
-        "User",
-        secondary=follows,
-        primaryjoin=(id == follows.c.follower_id),
-        secondaryjoin=(id == follows.c.followed_id),
-        backref=db.backref("followers", lazy="dynamic"),
-        lazy="dynamic"
-    )
-
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
 
@@ -140,50 +123,33 @@ class User(UserMixin, db.Model):
 
     @property
     def storage_used(self):
-        total = db.session.query(
-            db.func.coalesce(db.func.sum(StoredFile.size), 0)
+        result = db.session.query(
+            func.coalesce(func.sum(StoredFile.size), 0)
         ).filter(
             StoredFile.user_id == self.id
         ).scalar()
 
-        return int(total or 0)
-
-    @property
-    def storage_remaining(self):
-        return max(0, STORAGE_LIMIT - self.storage_used)
+        return int(result or 0)
 
     @property
     def follower_count(self):
-        return self.followers.count()
+        return Follow.query.filter_by(
+            followed_id=self.id
+        ).count()
 
     @property
     def following_count(self):
-        return self.following.count()
+        return Follow.query.filter_by(
+            follower_id=self.id
+        ).count()
 
-    def is_following(self, user):
-        return self.following.filter(
-            follows.c.followed_id == user.id
-        ).first() is not None
-
-
-# ==================================================
-# FOLDER MODEL
-# ==================================================
 
 class Folder(db.Model):
-
     id = db.Column(db.Integer, primary_key=True)
 
     name = db.Column(
-        db.String(100),
+        db.String(80),
         nullable=False
-    )
-
-    share_token = db.Column(
-        db.String(64),
-        unique=True,
-        nullable=False,
-        default=lambda: secrets.token_urlsafe(24)
     )
 
     created_at = db.Column(
@@ -200,25 +166,11 @@ class Folder(db.Model):
 
     files = db.relationship(
         "StoredFile",
-        backref="folder",
-        lazy=True
+        backref="folder"
     )
 
-    __table_args__ = (
-        UniqueConstraint(
-            "user_id",
-            "name",
-            name="unique_user_folder"
-        ),
-    )
-
-
-# ==================================================
-# FILE MODEL
-# ==================================================
 
 class StoredFile(db.Model):
-
     id = db.Column(db.Integer, primary_key=True)
 
     original_name = db.Column(
@@ -262,21 +214,128 @@ class StoredFile(db.Model):
     )
 
 
+class Follow(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+
+    follower_id = db.Column(
+        db.Integer,
+        db.ForeignKey("user.id"),
+        nullable=False
+    )
+
+    followed_id = db.Column(
+        db.Integer,
+        db.ForeignKey("user.id"),
+        nullable=False
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "follower_id",
+            "followed_id",
+            name="unique_follow"
+        ),
+    )
+
+
 # ==================================================
-# LOGIN
+# DATABASE INITIALIZATION
+# ==================================================
+
+def initialize_database():
+    db.create_all()
+
+    inspector = inspect(db.engine)
+
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("stored_file")
+    }
+
+    if "folder_id" not in columns:
+        with db.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE stored_file "
+                "ADD COLUMN folder_id INTEGER REFERENCES folder(id)"
+            )
+
+
+with app.app_context():
+    initialize_database()
+
+
+# ==================================================
+# LOGIN MANAGEMENT
 # ==================================================
 
 @login_manager.user_loader
 def load_user(user_id):
-    return db.session.get(User, int(user_id))
+    try:
+        return db.session.get(User, int(user_id))
+    except (TypeError, ValueError):
+        return None
 
+
+# ==================================================
+# TEMPLATE GLOBALS
+# ==================================================
 
 @app.context_processor
 def inject_globals():
     return {
         "site_name": "ChillyFile2.0",
-        "storage_limit": STORAGE_LIMIT
+        "storage_limit": USER_STORAGE_LIMIT,
+        "storage_limit_tb": USER_STORAGE_TB
     }
+
+
+# ==================================================
+# HELPER FUNCTIONS
+# ==================================================
+
+def format_bytes(size):
+    size = float(size)
+
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024 or unit == "TB":
+            return f"{size:.2f} {unit}"
+
+        size /= 1024
+
+    return f"{size:.2f} TB"
+
+
+def get_user_files(user_id, query="", folder_id=None):
+    files_query = StoredFile.query.filter_by(
+        user_id=user_id
+    )
+
+    if query:
+        files_query = files_query.filter(
+            StoredFile.original_name.ilike(f"%{query}%")
+        )
+
+    if folder_id is not None:
+        files_query = files_query.filter_by(
+            folder_id=folder_id
+        )
+
+    return files_query.order_by(
+        StoredFile.uploaded_at.desc()
+    ).all()
+
+
+def user_is_following(user_id, target_id):
+    return Follow.query.filter_by(
+        follower_id=user_id,
+        followed_id=target_id
+    ).first() is not None
 
 
 # ==================================================
@@ -285,7 +344,6 @@ def inject_globals():
 
 @app.get("/")
 def index():
-
     if current_user.is_authenticated:
         return redirect(url_for("dashboard"))
 
@@ -298,45 +356,42 @@ def index():
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
-
     if current_user.is_authenticated:
         return redirect(url_for("dashboard"))
 
     if request.method == "POST":
-
         username = request.form.get(
-            "username", ""
+            "username",
+            ""
         ).strip()
 
         password = request.form.get("password", "")
 
-        if not (
-            3 <= len(username) <= 32
-        ) or not username.replace("_", "").isalnum():
-
+        if not (3 <= len(username) <= 32):
             flash(
-                "Username must be 3–32 characters and use letters, numbers, or underscores.",
+                "Username must be between 3 and 32 characters.",
+                "error"
+            )
+
+        elif not username.replace("_", "").isalnum():
+            flash(
+                "Use only letters, numbers, and underscores.",
                 "error"
             )
 
         elif len(password) < 10:
-
             flash(
                 "Use a password with at least 10 characters.",
                 "error"
             )
 
-        elif User.query.filter_by(
-            username=username
-        ).first():
-
+        elif User.query.filter_by(username=username).first():
             flash(
                 "That username is already taken.",
                 "error"
             )
 
         else:
-
             user = User(username=username)
             user.set_password(password)
 
@@ -344,6 +399,11 @@ def register():
             db.session.commit()
 
             login_user(user)
+
+            flash(
+                "Your account has been created.",
+                "success"
+            )
 
             return redirect(url_for("dashboard"))
 
@@ -359,14 +419,13 @@ def register():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-
     if current_user.is_authenticated:
         return redirect(url_for("dashboard"))
 
     if request.method == "POST":
-
         username = request.form.get(
-            "username", ""
+            "username",
+            ""
         ).strip()
 
         password = request.form.get("password", "")
@@ -376,9 +435,7 @@ def login():
         ).first()
 
         if user and user.check_password(password):
-
             login_user(user, remember=True)
-
             return redirect(url_for("dashboard"))
 
         flash(
@@ -399,9 +456,7 @@ def login():
 @app.post("/logout")
 @login_required
 def logout():
-
     logout_user()
-
     return redirect(url_for("index"))
 
 
@@ -412,131 +467,100 @@ def logout():
 @app.get("/dashboard")
 @login_required
 def dashboard():
-
     query = request.args.get("q", "").strip()
+    folder_value = request.args.get("folder", "").strip()
 
-    files_query = StoredFile.query.filter_by(
-        user_id=current_user.id
+    active_folder = None
+
+    if folder_value:
+        try:
+            folder_id = int(folder_value)
+        except ValueError:
+            abort(404)
+
+        active_folder = Folder.query.filter_by(
+            id=folder_id,
+            user_id=current_user.id
+        ).first_or_404()
+
+    files = get_user_files(
+        current_user.id,
+        query=query,
+        folder_id=active_folder.id if active_folder else None
     )
-
-    if query:
-        files_query = files_query.filter(
-            StoredFile.original_name.ilike(
-                f"%{query}%"
-            )
-        )
-
-    files = files_query.order_by(
-        StoredFile.uploaded_at.desc()
-    ).all()
 
     folders = Folder.query.filter_by(
         user_id=current_user.id
     ).order_by(
-        Folder.created_at.desc()
+        Folder.name.asc()
     ).all()
+
+    followers = User.query.join(
+        Follow,
+        Follow.follower_id == User.id
+    ).filter(
+        Follow.followed_id == current_user.id
+    ).order_by(
+        User.username.asc()
+    ).all()
+
+    following = User.query.join(
+        Follow,
+        Follow.followed_id == User.id
+    ).filter(
+        Follow.follower_id == current_user.id
+    ).order_by(
+        User.username.asc()
+    ).all()
+
+    storage_used = current_user.storage_used
 
     return render_template(
         "dashboard.html",
         files=files,
-        folders=folders,
         query=query,
-        storage_used=current_user.storage_used,
-        storage_limit=STORAGE_LIMIT,
-        storage_remaining=current_user.storage_remaining
+        folders=folders,
+        active_folder=active_folder,
+        followers=followers,
+        following=following,
+        follower_count=len(followers),
+        following_count=len(following),
+        storage_used=storage_used,
+        storage_limit=USER_STORAGE_LIMIT,
+        storage_used_display=format_bytes(storage_used),
+        storage_limit_display=format_bytes(USER_STORAGE_LIMIT),
+        storage_percent=min(
+            100,
+            (storage_used / USER_STORAGE_LIMIT) * 100
+        ) if USER_STORAGE_LIMIT else 0
     )
 
 
 # ==================================================
-# UPLOAD FILES
+# USER PROFILE
 # ==================================================
 
-@app.post("/upload")
-@login_required
-def upload():
+@app.get("/profile/<username>")
+def profile(username):
+    profile_user = User.query.filter_by(
+        username=username
+    ).first_or_404()
 
-    incoming = request.files.getlist("files")
+    is_following = False
 
-    if not incoming or all(
-        not item.filename for item in incoming
-    ):
-
-        flash(
-            "Choose at least one file to upload.",
-            "error"
+    if current_user.is_authenticated:
+        is_following = user_is_following(
+            current_user.id,
+            profile_user.id
         )
 
-        return redirect(url_for("dashboard"))
-
-    saved = 0
-
-    for item in incoming:
-
-        if not item or not item.filename:
-            continue
-
-        safe_name = secure_filename(item.filename)
-
-        if not safe_name:
-            safe_name = "download"
-
-        # Check available quota before saving
-        item.stream.seek(0, os.SEEK_END)
-        file_size = item.stream.tell()
-        item.stream.seek(0)
-
-        if file_size > current_user.storage_remaining:
-
-            flash(
-                "You have reached your available storage quota.",
-                "error"
-            )
-
-            break
-
-        disk_name = secrets.token_hex(20)
-
-        destination = UPLOAD_DIR / disk_name
-
-        try:
-
-            item.save(destination)
-
-            record = StoredFile(
-                original_name=item.filename[:255],
-                disk_name=disk_name,
-                size=destination.stat().st_size,
-                share_token=secrets.token_urlsafe(24),
-                user_id=current_user.id
-            )
-
-            db.session.add(record)
-            db.session.flush()
-
-            saved += 1
-
-        except Exception:
-
-            destination.unlink(missing_ok=True)
-
-            db.session.rollback()
-
-            flash(
-                "An upload failed. Please try again.",
-                "error"
-            )
-
-            return redirect(url_for("dashboard"))
-
-    db.session.commit()
-
-    if saved:
-        flash(
-            f"{saved} file{'s' if saved != 1 else ''} uploaded.",
-            "success"
-        )
-
-    return redirect(url_for("dashboard"))
+    return render_template(
+        "profile.html",
+        profile_user=profile_user,
+        is_following=is_following,
+        follower_count=profile_user.follower_count,
+        following_count=profile_user.following_count
+    )
 
 
 # ==================================================
@@ -546,32 +570,29 @@ def upload():
 @app.post("/folders/create")
 @login_required
 def create_folder():
+    name = request.form.get("name", "").strip()
 
-    name = request.form.get(
-        "name", ""
-    ).strip()
-
-    if not name or len(name) > 100:
-
-        flash(
-            "Enter a folder name between 1 and 100 characters.",
-            "error"
-        )
-
+    if not name:
+        flash("Enter a folder name.", "error")
         return redirect(url_for("dashboard"))
 
-    existing = Folder.query.filter_by(
-        user_id=current_user.id,
-        name=name
+    if len(name) > 80:
+        flash(
+            "Folder names must be 80 characters or fewer.",
+            "error"
+        )
+        return redirect(url_for("dashboard"))
+
+    existing = Folder.query.filter(
+        Folder.user_id == current_user.id,
+        func.lower(Folder.name) == name.lower()
     ).first()
 
     if existing:
-
         flash(
-            "You already have a folder with that name.",
+            "A folder with that name already exists.",
             "error"
         )
-
         return redirect(url_for("dashboard"))
 
     folder = Folder(
@@ -584,109 +605,9 @@ def create_folder():
 
     flash("Folder created.", "success")
 
-    return redirect(url_for("dashboard"))
-
-
-# ==================================================
-# VIEW FOLDER
-# ==================================================
-
-@app.get("/folders/<int:folder_id>")
-@login_required
-def view_folder(folder_id):
-
-    folder = Folder.query.filter_by(
-        id=folder_id,
-        user_id=current_user.id
-    ).first_or_404()
-
-    files = StoredFile.query.filter_by(
-        folder_id=folder.id,
-        user_id=current_user.id
-    ).order_by(
-        StoredFile.uploaded_at.desc()
-    ).all()
-
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>{{ folder.name }} - ChillyFile2.0</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body {
-                background: #080808;
-                color: white;
-                font-family: Arial, sans-serif;
-                max-width: 850px;
-                margin: 50px auto;
-                padding: 20px;
-            }
-            a { color: white; }
-            .file {
-                background: #171717;
-                border: 1px solid #333;
-                padding: 16px;
-                margin: 10px 0;
-                border-radius: 10px;
-            }
-        </style>
-    </head>
-    <body>
-        <a href="{{ url_for('dashboard') }}">Back to dashboard</a>
-        <h1>{{ folder.name }}</h1>
-        <p>{{ files|length }} files</p>
-        {% for file in files %}
-        <div class="file">
-            {{ file.original_name }}
-            <a href="{{ url_for('download', token=file.share_token) }}">Download</a>
-        </div>
-        {% else %}
-        <p>This folder is empty.</p>
-        {% endfor %}
-    </body>
-    </html>
-    """, folder=folder, files=files)
-
-
-# ==================================================
-# MOVE FILE INTO FOLDER
-# ==================================================
-
-@app.post("/files/<int:file_id>/move")
-@login_required
-def move_file(file_id):
-
-    record = StoredFile.query.filter_by(
-        id=file_id,
-        user_id=current_user.id
-    ).first_or_404()
-
-    folder_id = request.form.get("folder_id", "").strip()
-
-    if not folder_id:
-
-        record.folder_id = None
-
-    else:
-
-        try:
-            folder_id = int(folder_id)
-        except ValueError:
-            abort(400)
-
-        folder = Folder.query.filter_by(
-            id=folder_id,
-            user_id=current_user.id
-        ).first_or_404()
-
-        record.folder_id = folder.id
-
-    db.session.commit()
-
-    flash("File organization updated.", "success")
-
-    return redirect(url_for("dashboard"))
+    return redirect(
+        url_for("dashboard", folder=folder.id)
+    )
 
 
 # ==================================================
@@ -696,25 +617,199 @@ def move_file(file_id):
 @app.post("/folders/<int:folder_id>/delete")
 @login_required
 def delete_folder(folder_id):
-
     folder = Folder.query.filter_by(
         id=folder_id,
         user_id=current_user.id
     ).first_or_404()
 
-    # Keep files, but move them out of the deleted folder
     StoredFile.query.filter_by(
-        folder_id=folder.id
-    ).update({
-        "folder_id": None
-    })
+        folder_id=folder.id,
+        user_id=current_user.id
+    ).update(
+        {"folder_id": None},
+        synchronize_session=False
+    )
 
     db.session.delete(folder)
     db.session.commit()
 
-    flash("Folder deleted.", "success")
+    flash(
+        "Folder deleted. Its files were moved to your main library.",
+        "success"
+    )
 
     return redirect(url_for("dashboard"))
+
+
+# ==================================================
+# MOVE FILE
+# ==================================================
+
+@app.post("/files/<int:file_id>/move")
+@login_required
+def move_file(file_id):
+    record = StoredFile.query.filter_by(
+        id=file_id,
+        user_id=current_user.id
+    ).first_or_404()
+
+    folder_value = request.form.get(
+        "folder_id",
+        ""
+    ).strip()
+
+    if not folder_value:
+        record.folder_id = None
+
+    else:
+        try:
+            folder_id = int(folder_value)
+        except ValueError:
+            flash("Invalid folder.", "error")
+            return redirect(url_for("dashboard"))
+
+        folder = Folder.query.filter_by(
+            id=folder_id,
+            user_id=current_user.id
+        ).first()
+
+        if folder is None:
+            flash("That folder does not exist.", "error")
+            return redirect(url_for("dashboard"))
+
+        record.folder_id = folder.id
+
+    db.session.commit()
+
+    flash("File moved.", "success")
+
+    return redirect(url_for("dashboard"))
+
+
+# ==================================================
+# UPLOAD
+# ==================================================
+
+@app.post("/upload")
+@login_required
+def upload():
+    incoming = request.files.getlist("files")
+
+    if not incoming or all(not item.filename for item in incoming):
+        flash(
+            "Choose at least one file to upload.",
+            "error"
+        )
+        return redirect(url_for("dashboard"))
+
+    folder_value = request.form.get(
+        "folder_id",
+        ""
+    ).strip()
+
+    target_folder = None
+
+    if folder_value:
+        try:
+            target_folder = Folder.query.filter_by(
+                id=int(folder_value),
+                user_id=current_user.id
+            ).first()
+        except ValueError:
+            target_folder = None
+
+        if target_folder is None:
+            flash("The selected folder is invalid.", "error")
+            return redirect(url_for("dashboard"))
+
+    used_storage = current_user.storage_used
+    saved_files = []
+    saved_count = 0
+    rejected_count = 0
+
+    try:
+        for item in incoming:
+            if not item or not item.filename:
+                continue
+
+            raw_name = item.filename.replace(
+                "\\",
+                "/"
+            ).split("/")[-1]
+
+            safe_name = secure_filename(raw_name)
+
+            if not safe_name:
+                safe_name = "download"
+
+            original_name = raw_name[:255] or "download"
+
+            disk_name = secrets.token_hex(20)
+            destination = UPLOAD_DIR / disk_name
+
+            item.save(destination)
+
+            file_size = destination.stat().st_size
+
+            if used_storage + file_size > USER_STORAGE_LIMIT:
+                destination.unlink(missing_ok=True)
+                rejected_count += 1
+                continue
+
+            record = StoredFile(
+                original_name=original_name,
+                disk_name=disk_name,
+                size=file_size,
+                share_token=secrets.token_urlsafe(24),
+                user_id=current_user.id,
+                folder_id=target_folder.id if target_folder else None
+            )
+
+            db.session.add(record)
+
+            saved_files.append(destination)
+            used_storage += file_size
+            saved_count += 1
+
+        db.session.commit()
+
+    except Exception:
+        db.session.rollback()
+
+        for path in saved_files:
+            path.unlink(missing_ok=True)
+
+        app.logger.exception("Upload failed")
+
+        flash(
+            "An upload failed. Please try again.",
+            "error"
+        )
+
+        return redirect(url_for("dashboard"))
+
+    if saved_count:
+        flash(
+            f"{saved_count} file{'s' if saved_count != 1 else ''} uploaded.",
+            "success"
+        )
+
+    if rejected_count:
+        flash(
+            f"{rejected_count} file{'s' if rejected_count != 1 else ''} "
+            "could not be uploaded because your storage quota would be exceeded.",
+            "error"
+        )
+
+    if not saved_count and not rejected_count:
+        flash("No files were uploaded.", "error")
+
+    return redirect(
+        url_for(
+            "dashboard",
+            folder=target_folder.id if target_folder else None
+        )
+    )
 
 
 # ==================================================
@@ -724,33 +819,43 @@ def delete_folder(folder_id):
 @app.post("/follow/<username>")
 @login_required
 def follow_user(username):
-
-    user = User.query.filter_by(
+    target = User.query.filter_by(
         username=username
     ).first_or_404()
 
-    if user.id == current_user.id:
-
+    if target.id == current_user.id:
         flash(
-            "You cannot follow yourself.",
+            "You cannot follow your own account.",
             "error"
         )
+        return redirect(url_for("dashboard"))
 
-        return redirect(
-            url_for("profile", username=username)
+    existing = Follow.query.filter_by(
+        follower_id=current_user.id,
+        followed_id=target.id
+    ).first()
+
+    if existing:
+        flash(
+            "You are already following that user.",
+            "error"
         )
+        return redirect(url_for("dashboard"))
 
-    if not current_user.is_following(user):
-
-        current_user.following.append(user)
-
-        db.session.commit()
-
-        flash("You are now following this user.", "success")
-
-    return redirect(
-        url_for("profile", username=username)
+    relationship = Follow(
+        follower_id=current_user.id,
+        followed_id=target.id
     )
+
+    db.session.add(relationship)
+    db.session.commit()
+
+    flash(
+        f"You are now following {target.username}.",
+        "success"
+    )
+
+    return redirect(url_for("dashboard"))
 
 
 # ==================================================
@@ -760,202 +865,72 @@ def follow_user(username):
 @app.post("/unfollow/<username>")
 @login_required
 def unfollow_user(username):
-
-    user = User.query.filter_by(
+    target = User.query.filter_by(
         username=username
     ).first_or_404()
 
-    if current_user.is_following(user):
+    relationship = Follow.query.filter_by(
+        follower_id=current_user.id,
+        followed_id=target.id
+    ).first()
 
-        current_user.following.remove(user)
-
+    if relationship:
+        db.session.delete(relationship)
         db.session.commit()
 
-        flash("You unfollowed this user.", "success")
+        flash(
+            f"You unfollowed {target.username}.",
+            "success"
+        )
+    else:
+        flash(
+            "You are not following that user.",
+            "error"
+        )
 
-    return redirect(
-        url_for("profile", username=username)
-    )
+    return redirect(url_for("dashboard"))
 
 
 # ==================================================
-# PUBLIC PROFILE
+# SEARCH USERS
 # ==================================================
 
-@app.get("/profile/<username>")
-def profile(username):
+@app.get("/users/search")
+@login_required
+def search_users():
+    query = request.args.get("q", "").strip()
 
-    user = User.query.filter_by(
-        username=username
-    ).first_or_404()
+    if not query:
+        return {"users": []}
 
-    files = StoredFile.query.filter_by(
-        user_id=user.id,
-        folder_id=None
+    matches = User.query.filter(
+        User.username.ilike(f"%{query}%"),
+        User.id != current_user.id
     ).order_by(
-        StoredFile.uploaded_at.desc()
-    ).all()
+        User.username.asc()
+    ).limit(20).all()
 
-    folders = Folder.query.filter_by(
-        user_id=user.id
-    ).order_by(
-        Folder.created_at.desc()
-    ).all()
-
-    is_following = (
-        current_user.is_authenticated
-        and current_user.is_following(user)
-        and current_user.id != user.id
-    )
-
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>{{ user.username }} - ChillyFile2.0</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body {
-                background: #080808;
-                color: white;
-                font-family: Arial, sans-serif;
-                max-width: 850px;
-                margin: 50px auto;
-                padding: 20px;
+    return {
+        "users": [
+            {
+                "username": user.username,
+                "followers": user.follower_count,
+                "following": user_is_following(
+                    current_user.id,
+                    user.id
+                )
             }
-            a { color: white; }
-            button {
-                background: white;
-                color: black;
-                padding: 10px 18px;
-                border: 0;
-                border-radius: 7px;
-                cursor: pointer;
-            }
-            .card {
-                background: #171717;
-                border: 1px solid #333;
-                padding: 16px;
-                margin: 10px 0;
-                border-radius: 10px;
-            }
-        </style>
-    </head>
-    <body>
-        <a href="{{ url_for('index') }}">ChillyFile2.0</a>
-        <h1>{{ user.username }}</h1>
-
-        <p>{{ user.follower_count }} followers</p>
-        <p>{{ user.following_count }} following</p>
-
-        {% if current_user.is_authenticated and current_user.id != user.id %}
-            {% if is_following %}
-            <form method="POST" action="{{ url_for('unfollow_user', username=user.username) }}">
-                <button type="submit">Unfollow</button>
-            </form>
-            {% else %}
-            <form method="POST" action="{{ url_for('follow_user', username=user.username) }}">
-                <button type="submit">Follow</button>
-            </form>
-            {% endif %}
-        {% endif %}
-
-        <h2>Public files</h2>
-        {% for file in files %}
-        <div class="card">
-            {{ file.original_name }}
-            <a href="{{ url_for('share', token=file.share_token) }}">View</a>
-        </div>
-        {% else %}
-        <p>No public files to display.</p>
-        {% endfor %}
-
-        <h2>Folders</h2>
-        {% for folder in folders %}
-        <div class="card">
-            {{ folder.name }}
-            <a href="{{ url_for('public_folder', token=folder.share_token) }}">View folder</a>
-        </div>
-        {% else %}
-        <p>No folders to display.</p>
-        {% endfor %}
-    </body>
-    </html>
-    """,
-    user=user,
-    files=files,
-    folders=folders,
-    is_following=is_following)
+            for user in matches
+        ]
+    }
 
 
 # ==================================================
-# PUBLIC SHARED FOLDER
-# ==================================================
-
-@app.get("/folder/<token>")
-def public_folder(token):
-
-    folder = Folder.query.filter_by(
-        share_token=token
-    ).first_or_404()
-
-    files = StoredFile.query.filter_by(
-        folder_id=folder.id,
-        user_id=folder.user_id
-    ).order_by(
-        StoredFile.uploaded_at.desc()
-    ).all()
-
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>{{ folder.name }} - ChillyFile2.0</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body {
-                background: #080808;
-                color: white;
-                font-family: Arial, sans-serif;
-                max-width: 850px;
-                margin: 50px auto;
-                padding: 20px;
-            }
-            a { color: white; }
-            .file {
-                background: #171717;
-                border: 1px solid #333;
-                padding: 16px;
-                margin: 10px 0;
-                border-radius: 10px;
-            }
-        </style>
-    </head>
-    <body>
-        <a href="{{ url_for('index') }}">ChillyFile2.0</a>
-        <h1>{{ folder.name }}</h1>
-        <p>Shared by {{ folder.owner.username }}</p>
-
-        {% for file in files %}
-        <div class="file">
-            {{ file.original_name }}
-            <a href="{{ url_for('download', token=file.share_token) }}">Download</a>
-        </div>
-        {% else %}
-        <p>This folder is empty.</p>
-        {% endfor %}
-    </body>
-    </html>
-    """, folder=folder, files=files)
-
-
-# ==================================================
-# SHARE FILE
+# SHARE PAGE
 # ==================================================
 
 @app.get("/share/<token>")
 def share(token):
-
     record = StoredFile.query.filter_by(
         share_token=token
     ).first_or_404()
@@ -972,12 +947,11 @@ def share(token):
 
 
 # ==================================================
-# DOWNLOAD FILE
+# DOWNLOAD
 # ==================================================
 
 @app.get("/download/<token>")
 def download(token):
-
     record = StoredFile.query.filter_by(
         share_token=token
     ).first_or_404()
@@ -1001,14 +975,12 @@ def download(token):
 @app.post("/delete/<int:file_id>")
 @login_required
 def delete_file(file_id):
-
     record = StoredFile.query.filter_by(
         id=file_id,
         user_id=current_user.id
     ).first_or_404()
 
     path = UPLOAD_DIR / record.disk_name
-
     path.unlink(missing_ok=True)
 
     db.session.delete(record)
@@ -1020,82 +992,53 @@ def delete_file(file_id):
 
 
 # ==================================================
-# STORAGE INFORMATION
+# STORAGE API
 # ==================================================
 
-@app.get("/api/storage")
+@app.get("/storage")
 @login_required
 def storage_information():
+    used = current_user.storage_used
 
     return {
-        "used_bytes": current_user.storage_used,
-        "remaining_bytes": current_user.storage_remaining,
-        "limit_bytes": STORAGE_LIMIT,
-        "limit_tb": 50
+        "used_bytes": used,
+        "limit_bytes": USER_STORAGE_LIMIT,
+        "used": format_bytes(used),
+        "limit": format_bytes(USER_STORAGE_LIMIT),
+        "percent": min(
+            100,
+            (used / USER_STORAGE_LIMIT) * 100
+        ) if USER_STORAGE_LIMIT else 0
     }
 
 
 # ==================================================
-# ERROR HANDLING
+# UPLOAD SIZE ERROR
 # ==================================================
 
 @app.errorhandler(413)
 def too_large(_error):
-
     flash(
-        "That file is too large for the current upload limit.",
+        "That upload is too large. "
+        f"The current request limit is "
+        f"{app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)} MB.",
         "error"
     )
 
     return redirect(
         url_for(
-            "dashboard"
-            if current_user.is_authenticated
-            else "index"
+            "dashboard" if current_user.is_authenticated else "index"
         )
     )
 
 
 # ==================================================
-# DATABASE INITIALIZATION AND MIGRATION
-# ==================================================
-
-with app.app_context():
-
-    db.create_all()
-
-    # Add folder_id to an existing StoredFile table.
-    # create_all() does not add columns to existing tables.
-    inspector = db.inspect(db.engine)
-
-    if inspector.has_table("stored_file"):
-
-        columns = [
-            column["name"]
-            for column in inspector.get_columns("stored_file")
-        ]
-
-        if "folder_id" not in columns:
-
-            with db.engine.begin() as connection:
-
-                connection.execute(
-                    db.text(
-                        "ALTER TABLE stored_file "
-                        "ADD COLUMN folder_id INTEGER "
-                        "REFERENCES folder(id)"
-                    )
-                )
-
-
-# ==================================================
-# START SERVER
+# RUN
 # ==================================================
 
 if __name__ == "__main__":
-
     app.run(
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=int(os.environ.get("PORT", "5000")),
-        debug=False
+        debug=True
     )
