@@ -25,7 +25,7 @@ from flask_login import (
     current_user
 )
 
-from sqlalchemy import UniqueConstraint, func, inspect
+from sqlalchemy import Boolean, UniqueConstraint, func, inspect
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
@@ -213,6 +213,14 @@ class StoredFile(db.Model):
         nullable=True
     )
 
+    # Public files appear on the owner's profile.
+    is_public = db.Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0"
+    )
+
 
 class Follow(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -258,11 +266,17 @@ def initialize_database():
         for column in inspector.get_columns("stored_file")
     }
 
-    if "folder_id" not in columns:
-        with db.engine.begin() as connection:
+    with db.engine.begin() as connection:
+        if "folder_id" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE stored_file "
                 "ADD COLUMN folder_id INTEGER REFERENCES folder(id)"
+            )
+
+        if "is_public" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE stored_file "
+                "ADD COLUMN is_public BOOLEAN NOT NULL DEFAULT FALSE"
             )
 
 
@@ -810,6 +824,29 @@ def upload():
             folder=target_folder.id if target_folder else None
         )
     )
+
+
+# ==================================================
+# CHANGE FILE VISIBILITY
+# ==================================================
+
+@app.post("/files/<int:file_id>/visibility")
+@login_required
+def toggle_file_visibility(file_id):
+    record = StoredFile.query.filter_by(
+        id=file_id,
+        user_id=current_user.id
+    ).first_or_404()
+
+    record.is_public = not record.is_public
+    db.session.commit()
+
+    if record.is_public:
+        flash("File is now visible on your public profile.", "success")
+    else:
+        flash("File is now hidden from your public profile.", "success")
+
+    return redirect(url_for("dashboard"))
 
 
 # ==================================================
