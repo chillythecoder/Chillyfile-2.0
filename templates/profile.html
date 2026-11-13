@@ -1,0 +1,132 @@
+
+{% extends "base.html" %}
+
+{% block title %}{{ profile_user.username }} · ChillyFile2.0{% endblock %}
+
+{% block content %}
+
+<section class="profile-page">
+
+    <div class="eyebrow">
+        USER PROFILE
+    </div>
+
+    <div class="profile-header">
+        <div class="profile-avatar">
+            {{ profile_user.username[0]|upper }}
+        </div>
+
+        <div class="profile-info">
+            <h1>{{ profile_user.username }}<span class="period">.</span></h1>
+
+            <p class="muted">
+                Member since {{ profile_user.created_at.strftime('%B %Y') }}
+            </p>
+        </div>
+    </div>
+
+    <div class="stats-grid">
+
+        <div class="stat-card">
+            <span>FILES</span>
+            <strong>{{ profile_user.files|length }}</strong>
+        </div>
+
+        <div class="stat-card">
+            <span>FOLLOWERS</span>
+            <strong>{{ follower_count }}</strong>
+        </div>
+
+        <div class="stat-card">
+            <span>FOLLOWING</span>
+            <strong>{{ following_count }}</strong>
+        </div>
+
+    </div>
+
+    {% if current_user.is_authenticated and current_user.id != profile_user.id %}
+
+        <div class="profile-actions">
+
+            {% if is_following %}
+                <form method="post"
+                      action="{{ url_for('unfollow_user', user_id=profile_user.id) }}">
+
+                    <button class="button button-light" type="submit">
+                        Following
+                    </button>
+                </form>
+
+            {% else %}
+                <form method="post"
+                      action="{{ url_for('follow_user', user_id=profile_user.id) }}">
+
+                    <button class="button button-light" type="submit">
+                        Follow
+                    </button>
+                </form>
+            {% endif %}
+
+        </div>
+
+    {% endif %}
+
+    <section class="section-block">
+
+        <div class="section-heading">
+            <div>
+                <span class="eyebrow">PUBLIC LIBRARY</span>
+                <h2>Shared files</h2>
+            </div>
+        </div>
+
+        {% set public_files = profile_user.files|selectattr('is_public')|list %}
+
+        {% if public_files %}
+
+            <div class="file-list">
+
+                {% for file in public_files %}
+
+                    <article class="file-row">
+
+                        <div class="file-type">FILE</div>
+
+                        <div class="file-info">
+                            <strong>{{ file.original_name }}</strong>
+
+                            <span>
+                                {{ file.size|filesizeformat }}
+                                ·
+                                {{ file.uploaded_at.strftime('%b %d, %Y') }}
+                            </span>
+                        </div>
+
+                        <div class="file-actions">
+                            <a class="text-button"
+                               href="{{ url_for('download', token=file.share_token) }}">
+                                Download
+                            </a>
+                        </div>
+
+                    </article>
+
+                {% endfor %}
+
+            </div>
+
+        {% else %}
+
+            <div class="empty-state">
+                <div class="empty-mark">—</div>
+                <h3>No public files</h3>
+                <p>This user hasn't shared any public files yet.</p>
+            </div>
+
+        {% endif %}
+
+    </section>
+
+</section>
+
+{% endblock %}
