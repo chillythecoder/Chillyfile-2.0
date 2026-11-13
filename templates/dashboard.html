@@ -1,22 +1,321 @@
+
 {% extends "base.html" %}
+
 {% block title %}My files · ChillyFile2.0{% endblock %}
+
 {% block content %}
-<section class="dashboard-head"><div><div class="eyebrow"><span class="eyebrow-dot"></span> YOUR PRIVATE SPACE</div><h1>My files<span class="period">.</span></h1><p class="muted">Welcome back, {{ current_user.username }}. Everything you upload lives here.</p></div><div class="file-count"><strong>{{ files|length }}</strong><span>FILES</span></div></section>
-<form class="upload-zone" action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" id="upload-form">
-  <input type="file" name="files" id="file-input" multiple required>
-  <div class="upload-content"><div class="upload-symbol">↑</div><h2>Drop files to upload</h2><p>or <label for="file-input" class="inline-link">browse your device</label></p><span class="upload-hint">Multiple files supported · 100 MB per request limit</span></div>
-  <div class="selected-files" id="selected-files"></div>
-  <button class="button button-light upload-submit" type="submit">Upload files <span class="arrow">↗</span></button>
-  <div class="upload-progress" id="upload-progress"><span></span></div>
-</form>
-<div class="files-toolbar"><div><h2>Your library</h2><span class="muted small">{{ files|length }} saved item{{ '' if files|length == 1 else 's' }}</span></div><form class="search-form" method="get"><input type="search" name="q" value="{{ query }}" placeholder="Search your files"><button type="submit" aria-label="Search">⌕</button></form></div>
-{% if files %}
-<div class="file-list">
-{% for file in files %}
-  <article class="file-row"><div class="file-type">FILE</div><div class="file-info"><strong>{{ file.original_name }}</strong><span>{{ (file.size / 1024)|round(1) }} KB · {{ file.uploaded_at.strftime('%b %d, %Y') }}</span></div><div class="file-actions"><button class="text-button copy-link" type="button" data-copy="{{ url_for('share', token=file.share_token, _external=True) }}">Copy link</button><a class="text-button" href="{{ url_for('download', token=file.share_token) }}">Download</a><form method="post" action="{{ url_for('delete_file', file_id=file.id) }}" onsubmit="return confirm('Delete this file permanently?')"><button class="text-button danger-text" type="submit">Delete</button></form></div></article>
-{% endfor %}
-</div>
-{% else %}
-<div class="empty-state"><div class="empty-mark">—</div><h3>{{ 'No matching files' if query else 'Your library is waiting' }}</h3><p>{{ 'Try another search term.' if query else 'Upload your first file to see it appear here.' }}</p></div>
-{% endif %}
+
+<section class="dashboard-head">
+    <div>
+        <div class="eyebrow">
+            <span class="eyebrow-dot"></span>
+            YOUR PRIVATE SPACE
+        </div>
+
+        <h1>My files<span class="period">.</span></h1>
+
+        <p class="muted">
+            Welcome back, {{ current_user.username }}.
+            Everything you upload lives here.
+        </p>
+
+        <a class="text-button" href="{{ url_for('profile', username=current_user.username) }}">
+            View your profile
+        </a>
+    </div>
+
+    <div class="file-count">
+        <strong>{{ files|length }}</strong>
+        <span>FILES</span>
+    </div>
+</section>
+
+<!-- STORAGE -->
+
+<section class="storage-card">
+    <div class="storage-heading">
+        <div>
+            <span class="eyebrow">YOUR STORAGE</span>
+            <h2>Storage overview</h2>
+        </div>
+
+        <strong>
+            {{ storage_used|default(0)|filesizeformat }}
+            /
+            {{ storage_limit|default(100 * 1024**4)|filesizeformat }}
+        </strong>
+    </div>
+
+    <div class="storage-track">
+        <div class="storage-fill"
+             style="width: {{ storage_percent|default(0)|float|round(2) }}%;">
+        </div>
+    </div>
+
+    <p class="muted small">
+        Your account has a displayed storage quota of 100 TB.
+        Actual available storage depends on the hosting and storage provider.
+    </p>
+</section>
+
+<!-- ACCOUNT STATS -->
+
+<section class="stats-grid">
+    <div class="stat-card">
+        <span>FILES</span>
+        <strong>{{ files|length }}</strong>
+    </div>
+
+    <div class="stat-card">
+        <span>FOLDERS</span>
+        <strong>{{ folders|length }}</strong>
+    </div>
+
+    <div class="stat-card">
+        <span>FOLLOWERS</span>
+        <strong>{{ follower_count|default(0) }}</strong>
+    </div>
+
+    <div class="stat-card">
+        <span>FOLLOWING</span>
+        <strong>{{ following_count|default(0) }}</strong>
+    </div>
+</section>
+
+<!-- UPLOAD -->
+
+<section class="section-block">
+    <div class="section-heading">
+        <div>
+            <span class="eyebrow">UPLOAD</span>
+            <h2>Add files</h2>
+        </div>
+    </div>
+
+    <form class="upload-zone"
+          action="{{ url_for('upload') }}"
+          method="post"
+          enctype="multipart/form-data"
+          id="upload-form">
+
+        <input type="file"
+               name="files"
+               id="file-input"
+               multiple
+               required>
+
+        <div class="upload-content">
+            <div class="upload-symbol">+</div>
+            <h2>Drop files to upload</h2>
+            <p>
+                or
+                <label for="file-input" class="inline-link">
+                    browse your device
+                </label>
+            </p>
+            <span class="upload-hint">
+                Multiple files supported
+            </span>
+        </div>
+
+        <div class="selected-files" id="selected-files"></div>
+
+        <button class="button button-light upload-submit" type="submit">
+            Upload files
+        </button>
+
+        <div class="upload-progress" id="upload-progress">
+            <span></span>
+        </div>
+    </form>
+</section>
+
+<!-- FOLDERS -->
+
+<section class="section-block">
+    <div class="section-heading">
+        <div>
+            <span class="eyebrow">ORGANIZATION</span>
+            <h2>Your folders</h2>
+        </div>
+    </div>
+
+    <form class="folder-create-form"
+          action="{{ url_for('create_folder') }}"
+          method="post">
+
+        <input type="text"
+               name="name"
+               placeholder="New folder name"
+               maxlength="100"
+               required>
+
+        <button class="button button-light" type="submit">
+            Create folder
+        </button>
+    </form>
+
+    {% if folders %}
+        <div class="folder-grid">
+            {% for folder in folders %}
+                <article class="folder-card">
+                    <div class="folder-icon">FOLDER</div>
+
+                    <div class="folder-info">
+                        <strong>{{ folder.name }}</strong>
+                        <span>
+                            {{ folder.files|length }}
+                            file{{ '' if folder.files|length == 1 else 's' }}
+                        </span>
+                    </div>
+
+                    <form method="post"
+                          action="{{ url_for('delete_folder', folder_id=folder.id) }}"
+                          onsubmit="return confirm('Delete this folder? Its files will remain in your library.');">
+
+                        <button class="text-button danger-text" type="submit">
+                            Delete
+                        </button>
+                    </form>
+                </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="empty-state">
+            <div class="empty-mark">—</div>
+            <h3>No folders yet</h3>
+            <p>Create a folder to organize your files.</p>
+        </div>
+    {% endif %}
+</section>
+
+<!-- FILE LIBRARY -->
+
+<section class="section-block">
+    <div class="files-toolbar">
+        <div>
+            <span class="eyebrow">YOUR LIBRARY</span>
+            <h2>Your files</h2>
+            <span class="muted small">
+                {{ files|length }} saved item{{ '' if files|length == 1 else 's' }}
+            </span>
+        </div>
+
+        <form class="search-form" method="get">
+            <input type="search"
+                   name="q"
+                   value="{{ query|default('') }}"
+                   placeholder="Search your files">
+
+            <button type="submit" aria-label="Search">
+                Search
+            </button>
+        </form>
+    </div>
+
+    {% if files %}
+        <div class="file-list">
+            {% for file in files %}
+                <article class="file-row">
+
+                    <div class="file-type">FILE</div>
+
+                    <div class="file-info">
+                        <strong>{{ file.original_name }}</strong>
+
+                        <span>
+                            {{ file.size|filesizeformat }}
+                            ·
+                            {{ file.uploaded_at.strftime('%b %d, %Y') }}
+                        </span>
+
+                        {% if file.folder %}
+                            <span>Folder: {{ file.folder.name }}</span>
+                        {% else %}
+                            <span>Unorganized</span>
+                        {% endif %}
+                    </div>
+
+                    <div class="file-actions">
+
+                        <button class="text-button copy-link"
+                                type="button"
+                                data-copy="{{ url_for('share', token=file.share_token, _external=True) }}">
+                            Copy link
+                        </button>
+
+                        <a class="text-button"
+                           href="{{ url_for('download', token=file.share_token) }}">
+                            Download
+                        </a>
+
+                        <form method="post"
+                              action="{{ url_for('move_file', file_id=file.id) }}">
+
+                            <select name="folder_id"
+                                    aria-label="Move file to folder">
+
+                                <option value="">No folder</option>
+
+                                {% for folder in folders %}
+                                    <option value="{{ folder.id }}"
+                                        {% if file.folder_id == folder.id %}selected{% endif %}>
+                                        {{ folder.name }}
+                                    </option>
+                                {% endfor %}
+                            </select>
+
+                            <button class="text-button" type="submit">
+                                Move
+                            </button>
+                        </form>
+
+                        <form method="post"
+                              action="{{ url_for('delete_file', file_id=file.id) }}"
+                              onsubmit="return confirm('Delete this file permanently?');">
+
+                            <button class="text-button danger-text" type="submit">
+                                Delete
+                            </button>
+                        </form>
+
+                    </div>
+                </article>
+            {% endfor %}
+        </div>
+
+    {% else %}
+        <div class="empty-state">
+            <div class="empty-mark">—</div>
+
+            <h3>
+                {{ 'No matching files' if query else 'Your library is waiting' }}
+            </h3>
+
+            <p>
+                {{ 'Try another search term.' if query else 'Upload your first file to see it appear here.' }}
+            </p>
+        </div>
+    {% endif %}
+</section>
+
+<!-- FIND USERS -->
+
+<section class="section-block">
+    <div class="section-heading">
+        <div>
+            <span class="eyebrow">COMMUNITY</span>
+            <h2>Find people</h2>
+        </div>
+    </div>
+
+    <form class="search-form" action="{{ url_for('search_users') }}" method="get">
+        <input type="search"
+               name="q"
+               placeholder="Search usernames">
+
+        <button type="submit">Search</button>
+    </form>
+</section>
+
 {% endblock %}
