@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div class="eyebrow"><span class="eyebrow-dot"></span> YOUR FILES, YOUR SPACE</div>
+  <h1>Files should feel<br><span class="outline-text">simple.</span></h1>
+  <p class="hero-copy">A cleaner place to upload, organize, and share the things that matter. No clutter. Just your files, ready when you need them.</p>
+  <div class="hero-actions"><a class="button button-light button-large" href="{{ url_for('register') }}">Create your account <span class="arrow">↗</span></a><a class="button button-outline button-large" href="{{ url_for('login') }}">Sign in</a></div>
+  <div class="hero-meta"><span>01 — PRIVATE FILE SPACE</span><span>02 — SIMPLE SHARING</span><span>03 — BUILT TO LAST</span></div>
+</section>
+<section class="feature-row">
+  <article class="feature-card"><span class="feature-number">01</span><div class="feature-icon">↑</div><h3>Upload without friction</h3><p>Drop in your files and watch the progress. Your uploads are saved on the server, not just in your browser.</p></article>
+  <article class="feature-card"><span class="feature-number">02</span><div class="feature-icon">↗</div><h3>Share in seconds</h3><p>Every upload gets a unique share page and a direct download link you can send anywhere.</p></article>
+  <article class="feature-card"><span class="feature-number">03</span><div class="feature-icon">⌁</div><h3>Keep it organized</h3><p>Your personal dashboard keeps your uploads together, searchable, and easy to manage.</p></article>
+</section>
+{% endblock %}

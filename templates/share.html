@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block title %}{{ file.original_name }} · ChillyFile2.0{% endblock %}
+{% block content %}
+<section class="share-wrap"><div class="eyebrow"><span class="eyebrow-dot"></span> SHARED FILE</div><div class="share-card"><div class="file-type large-type">FILE</div><h1>{{ file.original_name }}</h1><p class="muted">{{ (file.size / 1024)|round(1) }} KB · Shared with ChillyFile 2.0</p><a class="button button-light button-large full-width" href="{{ url_for('download', token=file.share_token) }}">Download file <span class="arrow">↓</span></a></div><a class="back-link" href="{{ url_for('index') }}">← ChillyFile 2.0</a></section>
+{% endblock %}

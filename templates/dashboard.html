@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}My files · ChillyFile2.0{% endblock %}
+{% block content %}
+<section class="dashboard-head"><div><div class="eyebrow"><span class="eyebrow-dot"></span> YOUR PRIVATE SPACE</div><h1>My files<span class="period">.</span></h1><p class="muted">Welcome back, {{ current_user.username }}. Everything you upload lives here.</p></div><div class="file-count"><strong>{{ files|length }}</strong><span>FILES</span></div></section>
+<form class="upload-zone" action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" id="upload-form">
+  <input type="file" name="files" id="file-input" multiple required>
+  <div class="upload-content"><div class="upload-symbol">↑</div><h2>Drop files to upload</h2><p>or <label for="file-input" class="inline-link">browse your device</label></p><span class="upload-hint">Multiple files supported · 100 MB per request limit</span></div>
+  <div class="selected-files" id="selected-files"></div>
+  <button class="button button-light upload-submit" type="submit">Upload files <span class="arrow">↗</span></button>
+  <div class="upload-progress" id="upload-progress"><span></span></div>
+</form>
+<div class="files-toolbar"><div><h2>Your library</h2><span class="muted small">{{ files|length }} saved item{{ '' if files|length == 1 else 's' }}</span></div><form class="search-form" method="get"><input type="search" name="q" value="{{ query }}" placeholder="Search your files"><button type="submit" aria-label="Search">⌕</button></form></div>
+{% if files %}
+<div class="file-list">
+{% for file in files %}
+  <article class="file-row"><div class="file-type">FILE</div><div class="file-info"><strong>{{ file.original_name }}</strong><span>{{ (file.size / 1024)|round(1) }} KB · {{ file.uploaded_at.strftime('%b %d, %Y') }}</span></div><div class="file-actions"><button class="text-button copy-link" type="button" data-copy="{{ url_for('share', token=file.share_token, _external=True) }}">Copy link</button><a class="text-button" href="{{ url_for('download', token=file.share_token) }}">Download</a><form method="post" action="{{ url_for('delete_file', file_id=file.id) }}" onsubmit="return confirm('Delete this file permanently?')"><button class="text-button danger-text" type="submit">Delete</button></form></div></article>
+{% endfor %}
+</div>
+{% else %}
+<div class="empty-state"><div class="empty-mark">—</div><h3>{{ 'No matching files' if query else 'Your library is waiting' }}</h3><p>{{ 'Try another search term.' if query else 'Upload your first file to see it appear here.' }}</p></div>
+{% endif %}
+{% endblock %}
