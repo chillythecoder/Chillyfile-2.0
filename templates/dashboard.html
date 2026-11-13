@@ -54,7 +54,7 @@
 
     <p class="muted small">
         Your account has a displayed storage quota of 100 TB.
-        Actual available storage depends on the hosting and storage provider.
+        Actual available storage depends on your hosting and storage provider.
     </p>
 </section>
 
@@ -113,9 +113,7 @@
                     browse your device
                 </label>
             </p>
-            <span class="upload-hint">
-                Multiple files supported
-            </span>
+            <span class="upload-hint">Multiple files supported</span>
         </div>
 
         <div class="selected-files" id="selected-files"></div>
@@ -147,7 +145,7 @@
         <input type="text"
                name="name"
                placeholder="New folder name"
-               maxlength="100"
+               maxlength="80"
                required>
 
         <button class="button button-light" type="submit">
@@ -234,9 +232,30 @@
                         {% else %}
                             <span>Unorganized</span>
                         {% endif %}
+
+                        <span>
+                            Visibility:
+                            {% if file.is_public %}
+                                <strong>Public</strong>
+                            {% else %}
+                                <strong>Private</strong>
+                            {% endif %}
+                        </span>
                     </div>
 
                     <div class="file-actions">
+
+                        <form method="post"
+                              action="{{ url_for('toggle_file_visibility', file_id=file.id) }}">
+
+                            <button class="text-button" type="submit">
+                                {% if file.is_public %}
+                                    Make private
+                                {% else %}
+                                    Make public
+                                {% endif %}
+                            </button>
+                        </form>
 
                         <button class="text-button copy-link"
                                 type="button"
