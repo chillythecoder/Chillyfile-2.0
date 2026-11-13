@@ -972,6 +972,14 @@ def share(token):
         share_token=token
     ).first_or_404()
 
+    # Private files are only visible to their owner.
+    if not record.is_public:
+        if not current_user.is_authenticated:
+            abort(404)
+
+        if current_user.id != record.user_id:
+            abort(404)
+
     path = UPLOAD_DIR / record.disk_name
 
     if not path.is_file():
@@ -992,6 +1000,14 @@ def download(token):
     record = StoredFile.query.filter_by(
         share_token=token
     ).first_or_404()
+
+    # Private files can only be downloaded by their owner.
+    if not record.is_public:
+        if not current_user.is_authenticated:
+            abort(404)
+
+        if current_user.id != record.user_id:
+            abort(404)
 
     path = UPLOAD_DIR / record.disk_name
 
