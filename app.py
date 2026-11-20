@@ -1,6 +1,11 @@
-
 import os
 import secrets
+import re
+import tempfile
+import zipfile
+
+import boto3
+from botocore.config import Config
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -36,13 +41,67 @@ from werkzeug.utils import secure_filename
 
 ROOT = Path(__file__).resolve().parent
 
-UPLOAD_DIR = Path(
-    os.environ.get("UPLOAD_DIR", str(ROOT / "uploads"))
-).resolve()
+# Backblaze B2 S3-compatible storage.
+B2_KEY_ID = os.environ.get("B2_KEY_ID", "").strip()
+B2_APPLICATION_KEY = os.environ.get("B2_APPLICATION_KEY", "").strip()
+B2_BUCKET_NAME = os.environ.get("B2_BUCKET_NAME", "").strip()
+B2_ENDPOINT = os.environ.get("B2_ENDPOINT", "").strip()
 
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+if B2_ENDPOINT and not B2_ENDPOINT.startswith(("https://", "http://")):
+    B2_ENDPOINT = "https://" + B2_ENDPOINT
 
-# Logical storage quota: 100 TB per account.
+B2_REGION = os.environ.get("B2_REGION", "").strip()
+
+if not B2_REGION and B2_ENDPOINT:
+    endpoint_host = B2_ENDPOINT.split("://", 1)[-1].split("/", 1)[0]
+    match = re.search(
+        r"s3[.-]([a-z0-9-]+)\.backblazeb2\.com",
+        endpoint_host
+    )
+    B2_REGION = match.group(1) if match else "us-west-004"
+
+if not B2_REGION:
+    B2_REGION = "us-west-004"
+
+B2_CONFIGURED = all((
+    B2_KEY_ID,
+    B2_APPLICATION_KEY,
+    B2_BUCKET_NAME,
+    B2_ENDPOINT
+))
+
+b2_client = None
+
+if B2_CONFIGURED:
+    b2_client = boto3.client(
+        "s3",
+        endpoint_url=B2_ENDPOINT,
+        aws_access_key_id=B2_KEY_ID,
+        aws_secret_access_key=B2_APPLICATION_KEY,
+        region_name=B2_REGION,
+        config=Config(signature_version="s3v4")
+    )
+
+
+def require_b2():
+    if not B2_CONFIGURED or b2_client is None:
+        raise RuntimeError(
+            "Backblaze storage is not configured. Check "
+            "B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET_NAME, "
+            "and B2_ENDPOINT in Render."
+        )
+
+    return b2_client
+
+
+def get_stream_size(stream):
+    stream.seek(0, os.SEEK_END)
+    size = stream.tell()
+    stream.seek(0)
+    return int(size)
+
+
+# This is an app quota, not storage included with Render or B2.
 USER_STORAGE_TB = int(os.environ.get("USER_STORAGE_TB", "100"))
 USER_STORAGE_LIMIT = USER_STORAGE_TB * (1024 ** 4)
 
@@ -164,6 +223,20 @@ class Folder(db.Model):
         nullable=False
     )
 
+    share_token = db.Column(
+        db.String(64),
+        unique=True,
+        nullable=False,
+        default=lambda: secrets.token_urlsafe(24)
+    )
+
+    is_public = db.Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0"
+    )
+
     files = db.relationship(
         "StoredFile",
         backref="folder"
@@ -178,6 +251,7 @@ class StoredFile(db.Model):
         nullable=False
     )
 
+    # This is the object key inside Backblaze B2.
     disk_name = db.Column(
         db.String(80),
         unique=True,
@@ -213,7 +287,13 @@ class StoredFile(db.Model):
         nullable=True
     )
 
-    # Public files appear on the owner's profile.
+    # Keeps nested directories when a whole folder is uploaded.
+    relative_path = db.Column(
+        db.String(1000),
+        nullable=False,
+        default=""
+    )
+
     is_public = db.Column(
         Boolean,
         nullable=False,
@@ -261,23 +341,55 @@ def initialize_database():
 
     inspector = inspect(db.engine)
 
-    columns = {
+    file_columns = {
         column["name"]
         for column in inspector.get_columns("stored_file")
     }
 
+    folder_columns = {
+        column["name"]
+        for column in inspector.get_columns("folder")
+    }
+
     with db.engine.begin() as connection:
-        if "folder_id" not in columns:
+
+        if "share_token" not in folder_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE folder ADD COLUMN share_token VARCHAR(64)"
+            )
+
+        if "is_public" not in folder_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE folder ADD COLUMN is_public "
+                "BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+
+        if "relative_path" not in file_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE stored_file ADD COLUMN relative_path "
+                "VARCHAR(1000) NOT NULL DEFAULT ''"
+            )
+
+        if "folder_id" not in file_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE stored_file "
                 "ADD COLUMN folder_id INTEGER REFERENCES folder(id)"
             )
 
-        if "is_public" not in columns:
+        if "is_public" not in file_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE stored_file "
                 "ADD COLUMN is_public BOOLEAN NOT NULL DEFAULT FALSE"
             )
+
+    # Give existing folders their own share tokens.
+    for folder in Folder.query.filter(
+        (Folder.share_token.is_(None)) |
+        (Folder.share_token == "")
+    ).all():
+        folder.share_token = secrets.token_urlsafe(24)
+
+    db.session.commit()
 
 
 with app.app_context():
@@ -374,11 +486,7 @@ def register():
         return redirect(url_for("dashboard"))
 
     if request.method == "POST":
-        username = request.form.get(
-            "username",
-            ""
-        ).strip()
-
+        username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
 
         if not (3 <= len(username) <= 32):
@@ -437,11 +545,7 @@ def login():
         return redirect(url_for("dashboard"))
 
     if request.method == "POST":
-        username = request.form.get(
-            "username",
-            ""
-        ).strip()
-
+        username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
 
         user = User.query.filter_by(
@@ -471,10 +575,7 @@ def login():
 @login_required
 def logout():
     logout_user()
-    return redirect(url_for("index"))
-
-
-# ==================================================
+    return redirect(url_for("index"))# ==================================================
 # DASHBOARD
 # ==================================================
 
@@ -611,7 +712,8 @@ def create_folder():
 
     folder = Folder(
         name=name,
-        user_id=current_user.id
+        user_id=current_user.id,
+        share_token=secrets.token_urlsafe(24)
     )
 
     db.session.add(folder)
@@ -636,11 +738,12 @@ def delete_folder(folder_id):
         user_id=current_user.id
     ).first_or_404()
 
+    # Keep the files in the main library.
     StoredFile.query.filter_by(
         folder_id=folder.id,
         user_id=current_user.id
     ).update(
-        {"folder_id": None},
+        {"folder_id": None, "relative_path": ""},
         synchronize_session=False
     )
 
@@ -648,7 +751,7 @@ def delete_folder(folder_id):
     db.session.commit()
 
     flash(
-        "Folder deleted. Its files were moved to your main library.",
+        "Folder deleted. Its files remain in your main library.",
         "success"
     )
 
@@ -674,6 +777,7 @@ def move_file(file_id):
 
     if not folder_value:
         record.folder_id = None
+        record.relative_path = ""
 
     else:
         try:
@@ -692,6 +796,7 @@ def move_file(file_id):
             return redirect(url_for("dashboard"))
 
         record.folder_id = folder.id
+        record.relative_path = ""
 
     db.session.commit()
 
@@ -701,17 +806,21 @@ def move_file(file_id):
 
 
 # ==================================================
-# UPLOAD
+# UPLOAD FILES OR A FOLDER
 # ==================================================
 
 @app.post("/upload")
 @login_required
 def upload():
     incoming = request.files.getlist("files")
+    incoming = [
+        item for item in incoming
+        if item and item.filename
+    ]
 
-    if not incoming or all(not item.filename for item in incoming):
+    if not incoming:
         flash(
-            "Choose at least one file to upload.",
+            "Choose at least one file or folder to upload.",
             "error"
         )
         return redirect(url_for("dashboard"))
@@ -736,52 +845,117 @@ def upload():
             flash("The selected folder is invalid.", "error")
             return redirect(url_for("dashboard"))
 
+    # Read the relative paths supplied by the browser's folder picker.
+    relative_names = []
+
+    for item in incoming:
+        supplied_path = item.filename or ""
+        supplied_path = supplied_path.replace("\\", "/").lstrip("/")
+
+        parts = [
+            part for part in supplied_path.split("/")
+            if part not in ("", ".", "..")
+        ]
+
+        if not parts:
+            parts = [
+                secure_filename(supplied_path) or "download"
+            ]
+
+        relative_names.append((parts, parts[-1]))
+
+    # If a whole directory was selected, create its top-level folder.
+    directory_roots = {
+        parts[0]
+        for parts, _ in relative_names
+        if len(parts) > 1
+    }
+
+    if target_folder is None and len(directory_roots) == 1:
+        root_name = next(iter(directory_roots))[:80]
+
+        target_folder = Folder.query.filter(
+            Folder.user_id == current_user.id,
+            func.lower(Folder.name) == root_name.lower()
+        ).first()
+
+        if target_folder is None:
+            target_folder = Folder(
+                name=root_name,
+                user_id=current_user.id,
+                share_token=secrets.token_urlsafe(24)
+            )
+
+            db.session.add(target_folder)
+            db.session.flush()
+
+    try:
+        storage = require_b2()
+    except Exception:
+        app.logger.exception("Backblaze is not configured")
+        flash(
+            "File storage is not ready. Check the Backblaze settings.",
+            "error"
+        )
+        return redirect(url_for("dashboard"))
+
     used_storage = current_user.storage_used
-    saved_files = []
+    uploaded_keys = []
     saved_count = 0
     rejected_count = 0
 
     try:
-        for item in incoming:
-            if not item or not item.filename:
-                continue
+        for item, (parts, leaf_name) in zip(
+            incoming,
+            relative_names
+        ):
+            raw_name = leaf_name.replace("\\", "/").split("/")[-1]
+            safe_name = secure_filename(raw_name) or "download"
+            original_name = raw_name[:255] or safe_name
 
-            raw_name = item.filename.replace(
-                "\\",
-                "/"
-            ).split("/")[-1]
-
-            safe_name = secure_filename(raw_name)
-
-            if not safe_name:
-                safe_name = "download"
-
-            original_name = raw_name[:255] or "download"
-
-            disk_name = secrets.token_hex(20)
-            destination = UPLOAD_DIR / disk_name
-
-            item.save(destination)
-
-            file_size = destination.stat().st_size
+            file_size = get_stream_size(item.stream)
 
             if used_storage + file_size > USER_STORAGE_LIMIT:
-                destination.unlink(missing_ok=True)
                 rejected_count += 1
                 continue
 
+            object_key = secrets.token_hex(20)
+
+            item.stream.seek(0)
+
+            storage.upload_fileobj(
+                item.stream,
+                B2_BUCKET_NAME,
+                object_key,
+                ExtraArgs={
+                    "ContentType": (
+                        item.mimetype or "application/octet-stream"
+                    )
+                }
+            )
+
+            uploaded_keys.append(object_key)
+
+            relative_path = ""
+
+            if target_folder and len(parts) > 1:
+                relative_path = "/".join(parts[1:])
+
             record = StoredFile(
                 original_name=original_name,
-                disk_name=disk_name,
+                disk_name=object_key,
                 size=file_size,
                 share_token=secrets.token_urlsafe(24),
                 user_id=current_user.id,
-                folder_id=target_folder.id if target_folder else None
+                folder_id=(
+                    target_folder.id
+                    if target_folder else None
+                ),
+                relative_path=relative_path
             )
 
             db.session.add(record)
 
-            saved_files.append(destination)
             used_storage += file_size
             saved_count += 1
 
@@ -790,10 +964,19 @@ def upload():
     except Exception:
         db.session.rollback()
 
-        for path in saved_files:
-            path.unlink(missing_ok=True)
+        app.logger.exception("Backblaze upload failed")
 
-        app.logger.exception("Upload failed")
+        for object_key in uploaded_keys:
+            try:
+                storage.delete_object(
+                    Bucket=B2_BUCKET_NAME,
+                    Key=object_key
+                )
+            except Exception:
+                app.logger.exception(
+                    "Could not clean up B2 object %s",
+                    object_key
+                )
 
         flash(
             "An upload failed. Please try again.",
@@ -811,22 +994,16 @@ def upload():
     if rejected_count:
         flash(
             f"{rejected_count} file{'s' if rejected_count != 1 else ''} "
-            "could not be uploaded because your storage quota would be exceeded.",
+            "exceeded your storage quota.",
             "error"
         )
-
-    if not saved_count and not rejected_count:
-        flash("No files were uploaded.", "error")
 
     return redirect(
         url_for(
             "dashboard",
             folder=target_folder.id if target_folder else None
         )
-    )
-
-
-# ==================================================
+    )# ==================================================
 # CHANGE FILE VISIBILITY
 # ==================================================
 
@@ -842,11 +1019,42 @@ def toggle_file_visibility(file_id):
     db.session.commit()
 
     if record.is_public:
-        flash("File is now visible on your public profile.", "success")
+        flash(
+            "File is now visible on your public profile.",
+            "success"
+        )
     else:
-        flash("File is now hidden from your public profile.", "success")
+        flash(
+            "File is now hidden from your public profile.",
+            "success"
+        )
 
     return redirect(url_for("dashboard"))
+
+
+# ==================================================
+# CHANGE FOLDER VISIBILITY
+# ==================================================
+
+@app.post("/folders/<int:folder_id>/visibility")
+@login_required
+def toggle_folder_visibility(folder_id):
+    folder = Folder.query.filter_by(
+        id=folder_id,
+        user_id=current_user.id
+    ).first_or_404()
+
+    folder.is_public = not folder.is_public
+    db.session.commit()
+
+    if folder.is_public:
+        flash("Folder sharing is now public.", "success")
+    else:
+        flash("Folder sharing is now private.", "success")
+
+    return redirect(
+        url_for("dashboard", folder=folder.id)
+    )
 
 
 # ==================================================
@@ -963,7 +1171,140 @@ def search_users():
 
 
 # ==================================================
-# SHARE PAGE
+# SHARED FOLDER PAGE
+# ==================================================
+
+@app.get("/folder/<token>")
+def shared_folder(token):
+    folder = Folder.query.filter_by(
+        share_token=token
+    ).first_or_404()
+
+    # Private folders are only visible to their owner.
+    if not folder.is_public:
+        if (
+            not current_user.is_authenticated
+            or current_user.id != folder.user_id
+        ):
+            abort(404)
+
+    files = StoredFile.query.filter_by(
+        folder_id=folder.id,
+        user_id=folder.user_id
+    ).order_by(
+        StoredFile.relative_path.asc(),
+        StoredFile.original_name.asc()
+    ).all()
+
+    return render_template(
+        "folder_share.html",
+        folder=folder,
+        files=files
+    )
+
+
+# ==================================================
+# DOWNLOAD ENTIRE FOLDER AS ZIP
+# ==================================================
+
+@app.get("/folder/<token>/download")
+def download_folder(token):
+    folder = Folder.query.filter_by(
+        share_token=token
+    ).first_or_404()
+
+    if not folder.is_public:
+        if (
+            not current_user.is_authenticated
+            or current_user.id != folder.user_id
+        ):
+            abort(404)
+
+    files = StoredFile.query.filter_by(
+        folder_id=folder.id,
+        user_id=folder.user_id
+    ).all()
+
+    if not files:
+        abort(404, description="This folder is empty.")
+
+    zip_path = None
+
+    try:
+        storage = require_b2()
+
+        temporary = tempfile.NamedTemporaryFile(
+            suffix=".zip",
+            delete=False
+        )
+
+        zip_path = temporary.name
+        temporary.close()
+
+        with zipfile.ZipFile(
+            zip_path,
+            "w",
+            zipfile.ZIP_DEFLATED
+        ) as archive:
+
+            for record in files:
+                result = storage.get_object(
+                    Bucket=B2_BUCKET_NAME,
+                    Key=record.disk_name
+                )
+
+                archive_name = "/".join(
+                    part for part in (
+                        folder.name,
+                        record.relative_path,
+                        record.original_name
+                    )
+                    if part
+                )
+
+                with result["Body"] as body:
+                    archive.writestr(
+                        archive_name,
+                        body.read()
+                    )
+
+        response = send_file(
+            zip_path,
+            as_attachment=True,
+            download_name=(
+                f"{secure_filename(folder.name) or 'folder'}.zip"
+            ),
+            mimetype="application/zip"
+        )
+
+        response.call_on_close(
+            lambda: (
+                os.path.exists(zip_path)
+                and os.remove(zip_path)
+            )
+        )
+
+        return response
+
+    except Exception:
+        app.logger.exception(
+            "Could not create folder archive"
+        )
+
+        if zip_path and os.path.exists(zip_path):
+            try:
+                os.remove(zip_path)
+            except OSError:
+                pass
+
+        abort(
+            503,
+            description="Folder download is temporarily unavailable."
+        )
+
+
+# ==================================================
+# SHARE INDIVIDUAL FILE
 # ==================================================
 
 @app.get("/share/<token>")
@@ -974,16 +1315,11 @@ def share(token):
 
     # Private files are only visible to their owner.
     if not record.is_public:
-        if not current_user.is_authenticated:
+        if (
+            not current_user.is_authenticated
+            or current_user.id != record.user_id
+        ):
             abort(404)
-
-        if current_user.id != record.user_id:
-            abort(404)
-
-    path = UPLOAD_DIR / record.disk_name
-
-    if not path.is_file():
-        abort(404)
 
     return render_template(
         "share.html",
@@ -992,7 +1328,7 @@ def share(token):
 
 
 # ==================================================
-# DOWNLOAD
+# DOWNLOAD INDIVIDUAL FILE
 # ==================================================
 
 @app.get("/download/<token>")
@@ -1001,27 +1337,40 @@ def download(token):
         share_token=token
     ).first_or_404()
 
-    # Private files can only be downloaded by their owner.
     if not record.is_public:
-        if not current_user.is_authenticated:
+        if (
+            not current_user.is_authenticated
+            or current_user.id != record.user_id
+        ):
             abort(404)
 
-        if current_user.id != record.user_id:
-            abort(404)
+    try:
+        storage = require_b2()
 
-    path = UPLOAD_DIR / record.disk_name
+        signed_url = storage.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": B2_BUCKET_NAME,
+                "Key": record.disk_name,
+                "ResponseContentDisposition": (
+                    "attachment; filename="
+                    f'"{record.original_name.replace(chr(34), "")}"'
+                )
+            },
+            ExpiresIn=300
+        )
 
-    if not path.is_file():
-        abort(404)
+        return redirect(signed_url)
 
-    return send_file(
-        path,
-        as_attachment=True,
-        download_name=record.original_name
-    )
+    except Exception:
+        app.logger.exception(
+            "Could not generate Backblaze download URL"
+        )
 
-
-# ==================================================
+        abort(
+            503,
+            description="File storage is temporarily unavailable."
+        )# ==================================================
 # DELETE FILE
 # ==================================================
 
@@ -1033,8 +1382,25 @@ def delete_file(file_id):
         user_id=current_user.id
     ).first_or_404()
 
-    path = UPLOAD_DIR / record.disk_name
-    path.unlink(missing_ok=True)
+    try:
+        storage = require_b2()
+
+        storage.delete_object(
+            Bucket=B2_BUCKET_NAME,
+            Key=record.disk_name
+        )
+
+    except Exception:
+        app.logger.exception(
+            "Could not delete file from Backblaze"
+        )
+
+        flash(
+            "The file could not be deleted from storage.",
+            "error"
+        )
+
+        return redirect(url_for("dashboard"))
 
     db.session.delete(record)
     db.session.commit()
@@ -1073,14 +1439,16 @@ def storage_information():
 def too_large(_error):
     flash(
         "That upload is too large. "
-        f"The current request limit is "
+        "The current request limit is "
         f"{app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)} MB.",
         "error"
     )
 
     return redirect(
         url_for(
-            "dashboard" if current_user.is_authenticated else "index"
+            "dashboard"
+            if current_user.is_authenticated
+            else "index"
         )
     )
 
