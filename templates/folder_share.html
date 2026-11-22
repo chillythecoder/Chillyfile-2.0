@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ folder.name }} - ChillyFile</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 40px 20px;
+            background: #080808;
+            color: #fff;
+            font-family: Arial, sans-serif;
+        }
+
+        .container {
+            max-width: 850px;
+            margin: auto;
+        }
+
+        .header {
+            margin-bottom: 30px;
+        }
+
+        .logo {
+            font-size: 25px;
+            font-weight: bold;
+            margin-bottom: 35px;
+        }
+
+        .logo span {
+            color: #999;
+        }
+
+        h1 {
+            font-size: 30px;
+            margin-bottom: 8px;
+            overflow-wrap: anywhere;
+        }
+
+        .subtitle {
+            color: #999;
+        }
+
+        .files {
+            margin-top: 30px;
+            border: 1px solid #292929;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .file {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 15px;
+            padding: 18px;
+            border-bottom: 1px solid #292929;
+        }
+
+        .file:last-child {
+            border-bottom: none;
+        }
+
+        .file-name {
+            overflow-wrap: anywhere;
+        }
+
+        .file-path {
+            color: #888;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+
+        .download {
+            background: white;
+            color: black;
+            padding: 9px 14px;
+            border-radius: 7px;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .download:hover {
+            background: #ddd;
+        }
+
+        .empty {
+            padding: 35px;
+            text-align: center;
+            color: #999;
+        }
+
+        .footer {
+            margin-top: 25px;
+            color: #666;
+            font-size: 12px;
+            text-align: center;
+        }
+
+        @media (max-width: 550px) {
+            .file {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main class="container">
+        <div class="header">
+            <div class="logo">Chilly<span>File</span></div>
+
+            <h1>📁 {{ folder.name }}</h1>
+            <div class="subtitle">Shared folder</div>
+        </div>
+
+        <div class="files">
+            {% if files %}
+                {% for file in files %}
+                    <div class="file">
+                        <div>
+                            <div class="file-name">
+                                📄 {{ file.original_name }}
+                            </div>
+
+                            {% if file.relative_path %}
+                                <div class="file-path">
+                                    {{ file.relative_path }}
+                                </div>
+                            {% endif %}
+                        </div>
+
+                        <a
+                            class="download"
+                            href="{{ url_for('download_file', token=file.share_token) }}"
+                        >
+                            Download
+                        </a>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <div class="empty">
+                    This folder is empty.
+                </div>
+            {% endif %}
+        </div>
+
+        <div class="footer">
+            Shared using Chillyfile wooo!
+        </div>
+    </main>
+</body>
+</html>
