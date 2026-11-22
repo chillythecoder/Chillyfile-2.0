@@ -122,6 +122,7 @@
 
         <a class="folder-card" href="{{ url_for('dashboard') }}">
             <div class="folder-icon">ALL FILES</div>
+
             <div class="folder-info">
                 <strong>All files</strong>
                 <span>Open your main library</span>
@@ -146,15 +147,36 @@
                     </div>
                 </a>
 
-                <form method="post"
-                      action="{{ url_for('delete_folder', folder_id=folder.id) }}"
-                      onsubmit="return confirm('Delete this folder? Its files will remain in your library.');">
+                <div class="folder-actions">
 
-                    <button class="text-button danger-text" type="submit">
-                        Delete
+                    <button class="text-button copy-link"
+                            type="button"
+                            data-copy="{{ url_for('shared_folder', token=folder.share_token, _external=True) }}">
+                        Copy link
                     </button>
-                </form>
 
+                    <form method="post"
+                          action="{{ url_for('toggle_folder_visibility', folder_id=folder.id) }}">
+
+                        <button class="text-button" type="submit">
+                            {% if folder.is_public %}
+                                Make private
+                            {% else %}
+                                Make public
+                            {% endif %}
+                        </button>
+                    </form>
+
+                    <form method="post"
+                          action="{{ url_for('delete_folder', folder_id=folder.id) }}"
+                          onsubmit="return confirm('Delete this folder? Its files will remain in your library.');">
+
+                        <button class="text-button danger-text" type="submit">
+                            Delete
+                        </button>
+                    </form>
+
+                </div>
             </article>
         {% else %}
             <div class="empty-state">
@@ -166,6 +188,59 @@
 
     </div>
 </section>
+
+<!-- ACTIVE FOLDER SHARING -->
+
+{% if active_folder %}
+<section class="section-block">
+    <div class="section-heading">
+        <div>
+            <span class="eyebrow">FOLDER SHARING</span>
+            <h2>Share {{ active_folder.name }}</h2>
+        </div>
+    </div>
+
+    <p class="muted">
+        Share this link to let people browse the folder and download its files.
+    </p>
+
+    <div class="file-actions">
+        <button class="button button-light copy-link"
+                type="button"
+                data-copy="{{ url_for('shared_folder', token=active_folder.share_token, _external=True) }}">
+            Copy folder link
+        </button>
+
+        <a class="button button-light"
+           href="{{ url_for('download_folder', token=active_folder.share_token) }}">
+            Download folder ZIP
+        </a>
+
+        <form method="post"
+              action="{{ url_for('toggle_folder_visibility', folder_id=active_folder.id) }}">
+
+            <button class="text-button" type="submit">
+                {% if active_folder.is_public %}
+                    Make folder private
+                {% else %}
+                    Make folder public
+                {% endif %}
+            </button>
+        </form>
+    </div>
+
+    <p class="muted small">
+        Folder visibility:
+        <strong>
+            {% if active_folder.is_public %}
+                Public
+            {% else %}
+                Private
+            {% endif %}
+        </strong>
+    </p>
+</section>
+{% endif %}
 
 <!-- UPLOAD -->
 
@@ -195,30 +270,55 @@
                    value="{{ active_folder.id }}">
         {% endif %}
 
+        <!-- Individual files -->
         <input type="file"
                name="files"
                id="file-input"
                multiple
-               required>
+               hidden>
+
+        <!-- Entire folders -->
+        <input type="file"
+               name="files"
+               id="folder-input"
+               webkitdirectory
+               directory
+               multiple
+               hidden>
 
         <div class="upload-content">
             <div class="upload-symbol">+</div>
-            <h2>Drop files to upload</h2>
 
-            <p>
-                or
-                <label for="file-input" class="inline-link">
-                    browse your device
-                </label>
+            <h2>Upload to ChillyFile</h2>
+
+            <p class="muted">
+                Choose individual files or upload an entire folder.
             </p>
 
-            <span class="upload-hint">Multiple files supported</span>
+            <div class="upload-buttons">
+                <label for="file-input" class="button button-light upload-picker">
+                    Upload files
+                </label>
+
+                <label for="folder-input" class="button button-light upload-picker">
+                    Upload folder
+                </label>
+            </div>
+
+            <span class="upload-hint">
+                Multiple files and nested folders supported
+            </span>
         </div>
 
-        <div class="selected-files" id="selected-files"></div>
+        <div class="selected-files" id="selected-files">
+            No files selected.
+        </div>
 
-        <button class="button button-light upload-submit" type="submit">
-            Upload files
+        <button class="button button-light upload-submit"
+                id="upload-submit"
+                type="submit"
+                disabled>
+            Start upload
         </button>
 
         <div class="upload-progress" id="upload-progress">
@@ -264,7 +364,6 @@
             <button type="submit" aria-label="Search">
                 Search
             </button>
-
         </form>
     </div>
 
@@ -299,6 +398,10 @@
                             <span>Unorganized</span>
                         {% endif %}
 
+                        {% if file.relative_path %}
+                            <span>Path: {{ file.relative_path }}</span>
+                        {% endif %}
+
                         <span>
                             Visibility:
                             {% if file.is_public %}
@@ -322,7 +425,6 @@
                                     Make public
                                 {% endif %}
                             </button>
-
                         </form>
 
                         <button class="text-button copy-link"
@@ -350,13 +452,11 @@
                                         {{ folder.name }}
                                     </option>
                                 {% endfor %}
-
                             </select>
 
                             <button class="text-button" type="submit">
                                 Move
                             </button>
-
                         </form>
 
                         <form method="post"
@@ -366,7 +466,6 @@
                             <button class="text-button danger-text" type="submit">
                                 Delete
                             </button>
-
                         </form>
 
                     </div>
@@ -423,8 +522,94 @@
                placeholder="Search usernames">
 
         <button type="submit">Search</button>
-
     </form>
 </section>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const fileInput = document.getElementById("file-input");
+    const folderInput = document.getElementById("folder-input");
+    const selectedFiles = document.getElementById("selected-files");
+    const uploadForm = document.getElementById("upload-form");
+    const uploadButton = document.getElementById("upload-submit");
+
+    function showSelectedFiles(input) {
+        if (!input || !input.files) return;
+
+        const count = input.files.length;
+
+        if (count === 0) {
+            selectedFiles.textContent = "No files selected.";
+            uploadButton.disabled = true;
+            return;
+        }
+
+        selectedFiles.textContent =
+            count + (count === 1 ? " file selected." : " files selected.");
+
+        uploadButton.disabled = false;
+    }
+
+    function clearOtherInput(activeInput) {
+        if (activeInput === fileInput) {
+            folderInput.value = "";
+        } else {
+            fileInput.value = "";
+        }
+    }
+
+    if (fileInput) {
+        fileInput.addEventListener("change", function () {
+            clearOtherInput(fileInput);
+            showSelectedFiles(fileInput);
+        });
+    }
+
+    if (folderInput) {
+        folderInput.addEventListener("change", function () {
+            clearOtherInput(folderInput);
+            showSelectedFiles(folderInput);
+        });
+    }
+
+    if (uploadForm) {
+        uploadForm.addEventListener("submit", function () {
+            const hasFiles =
+                (fileInput.files && fileInput.files.length > 0) ||
+                (folderInput.files && folderInput.files.length > 0);
+
+            if (!hasFiles) {
+                alert("Choose files or a folder first.");
+                return;
+            }
+
+            uploadButton.disabled = true;
+            uploadButton.textContent = "Uploading...";
+        });
+    }
+
+    document.querySelectorAll(".copy-link").forEach(function (button) {
+        button.addEventListener("click", async function () {
+            const link = button.dataset.copy;
+
+            if (!link) return;
+
+            try {
+                await navigator.clipboard.writeText(link);
+
+                const originalText = button.textContent;
+                button.textContent = "Copied!";
+
+                setTimeout(function () {
+                    button.textContent = originalText;
+                }, 1800);
+
+            } catch (error) {
+                window.prompt("Copy this link:", link);
+            }
+        });
+    });
+});
+</script>
 
 {% endblock %}
